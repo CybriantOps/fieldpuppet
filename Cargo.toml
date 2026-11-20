@@ -1,6 +1,6 @@
 [package]
 name = "fieldpuppet"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 description = "Multi-device Modbus TCP simulator with a built-in MCP server, so AI assistants can create devices, run scenarios and inject faults."
 license = "MIT OR Apache-2.0"
