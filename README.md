@@ -36,6 +36,8 @@ Download the file for your system from the [Releases](../../releases) page and u
 
 Remember where you put the program; you need its full path in the next step.
 
+**One file for Claude Desktop:** every release also has an `.mcpb` bundle per system, for example `fieldpuppet-windows-x86_64.mcpb`. Claude Desktop can install such a bundle from its Extensions settings, with no config file to edit.
+
 Building from source instead needs [Rust](https://rustup.rs): `cargo install --path .`
 
 ## Connect it to Claude Desktop
