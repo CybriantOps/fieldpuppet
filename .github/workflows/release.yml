@@ -1,4 +1,5 @@
-# Builds downloadable programs for every system and attaches them to the release.
+# Builds downloadable programs for every system and attaches them to the release,
+# then lists the release in the MCP Registry.
 # Runs when a version tag is pushed, or by hand from the Actions tab for an existing tag.
 name: Release
 
@@ -58,9 +59,42 @@ jobs:
           Copy-Item "target/${{ matrix.target }}/release/$env:BIN.exe", README.md dist/
           Copy-Item examples dist/ -Recurse
           Compress-Archive -Path dist/* -DestinationPath "$env:BIN-${{ matrix.name }}.zip"
+      # One-file bundle that MCP clients such as Claude Desktop can install directly.
+      - name: Package (MCPB bundle)
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            python scripts/make_mcpb.py "target/${{ matrix.target }}/release/$BIN.exe" "${{ matrix.name }}" "$TAG"
+          else
+            python3 scripts/make_mcpb.py "target/${{ matrix.target }}/release/$BIN" "${{ matrix.name }}" "$TAG"
+          fi
       # Files go straight onto the release, so no workflow artifact storage is used.
       - name: Attach to release
         shell: bash
         run: |
           gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --title "$TAG" --generate-notes || true
           gh release upload "$TAG" "$BIN-${{ matrix.name }}".* --clobber
+
+  registry:
+    name: MCP Registry
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - name: Write server.json from the released bundles
+        run: |
+          mkdir bundles
+          gh release download "$TAG" --pattern "*.mcpb" --dir bundles
+          python3 scripts/make_server_json.py "$TAG" bundles/*.mcpb
+          gh release upload "$TAG" server.json --clobber
+      # The workflow proves to the registry that it runs in this GitHub organization; no secret is stored.
+      - name: Publish to the MCP Registry
+        run: |
+          curl -sSL "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_linux_amd64.tar.gz" | tar xz mcp-publisher
+          ./mcp-publisher login github-oidc
+          ./mcp-publisher publish server.json
