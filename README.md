@@ -1,5 +1,7 @@
 # fieldpuppet
 
+[![fieldpuppet MCP server – quality and maintenance score on Glama](https://glama.ai/mcp/servers/CybriantOps/fieldpuppet/badges/score.svg)](https://glama.ai/mcp/servers/CybriantOps/fieldpuppet)
+
 A Modbus TCP device simulator that an AI assistant can drive.
 
 Start one small program and it can impersonate hundreds of Modbus devices at once, each on its own port. Through its built-in [MCP](https://modelcontextprotocol.io) server you tell an assistant such as Claude what you need in plain language — *"set up three pumps and an energy meter, then make pump 2 stop answering for thirty seconds"* — and the assistant creates the devices, plays the scenario and reports what your software asked them for.
