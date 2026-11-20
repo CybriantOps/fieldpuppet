@@ -18,6 +18,7 @@ Developed and maintained by the team behind [PLCGateway](https://plcgateway.com)
 - **Scenarios.** A timeline of steps per device: change a value at 10 s, start a ramp at 30 s, break communication at 60 s.
 - **Communication faults.** Slow answers, no answer at all, Modbus exception replies, dropped connections — per device, with an optional time limit.
 - **Traffic log.** See exactly which registers your software polled and what it got back.
+- **Live dashboard.** A web page that shows every device, its points and current values, running scenarios and faults, and a plain-language feed of everything the assistant changed.
 - **Works without AI too.** Describe devices in a YAML file and run them from the command line.
 - **Small and quick.** One executable of about 2 MB with nothing to install. On a laptop-class machine, 1,000 devices with ten changing values each used about 11 MB of memory and under 1 % of one CPU core.
 
@@ -83,6 +84,18 @@ The simulator speaks MCP over standard input and output, so any client that can 
 ```
 claude mcp add fieldpuppet -- /full/path/to/fieldpuppet mcp
 ```
+
+## Dashboard
+
+While the simulator runs, open **http://127.0.0.1:5080** in a browser. The page updates by itself and shows:
+
+- every running device with its address, and whether a scenario or fault is active on it;
+- the points of the selected device: current value, address, data type and how the value is changing;
+- the steps of its scenario and which of them have already run;
+- the most recent Modbus requests it received and how they were answered;
+- an activity feed listing, in order, everything that was changed: devices created, values set, scenarios started, faults injected and cleared.
+
+The dashboard only displays; it cannot change anything. If port 5080 is taken the next free port is used, and asking the assistant *"where is the dashboard?"* gives the address. Start with `--no-ui` to switch it off.
 
 ## Things to ask
 
@@ -211,6 +224,8 @@ Both the current MCP revision (2026-07-28) and the earlier handshake-based revis
 | `--max-devices` | `1000` | Upper limit on running devices |
 | `--tick-ms` | `200` | How often signals update |
 | `--data-dir` | `~/.fieldpuppet/projects` | Where `save_project` keeps its files |
+| `--ui-port` | `5080` | Port of the web dashboard |
+| `--no-ui` | – | Do not start the dashboard |
 | `--project` (`mcp` only) | – | Project file to load at startup |
 
 Options go after the command, for example `"args": ["mcp", "--base-port", "6000"]`.
@@ -220,6 +235,7 @@ Options go after the command, for example `"args": ["mcp", "--base-port", "6000"
 - By default the simulator listens on this computer only. Use `--bind 0.0.0.0` only on a network where nobody could mistake a simulated device for a real one.
 - Port 502, the standard Modbus port, needs administrator rights on Linux and macOS. The default range starting at 5020 does not.
 - Modbus has no authentication. Anyone who can reach a simulated device can read and write it.
+- The dashboard has no login either. It listens on the same address as the devices and is read-only.
 
 ## Limits in this version
 
