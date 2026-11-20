@@ -1,0 +1,213 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>fieldpuppet</title>
+<style>
+  :root {
+    --bg: #f4f5f7; --panel: #ffffff; --line: #dfe2e8; --text: #1b1f27; --muted: #667085;
+    --accent: #0b6bcb; --accent-soft: #e4f0fc; --ok: #177245; --ok-soft: #e2f4ea;
+    --bad: #b42318; --bad-soft: #fde8e6; --warn: #8a5a00; --warn-soft: #fdf1d3;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #101319; --panel: #171b23; --line: #2a303b; --text: #e6e9ef; --muted: #8f99aa;
+      --accent: #6cb2f7; --accent-soft: #17304a; --ok: #6fd39a; --ok-soft: #153324;
+      --bad: #ff8f85; --bad-soft: #43201d; --warn: #f0c060; --warn-soft: #3b2f12;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  header { display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap; padding: 14px 20px; border-bottom: 1px solid var(--line); background: var(--panel); }
+  header h1 { margin: 0; font-size: 18px; letter-spacing: .2px; }
+  header .meta { color: var(--muted); font-size: 13px; }
+  header .live { margin-left: auto; font-size: 12px; color: var(--muted); }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--ok); margin-right: 6px; }
+  .dot.off { background: var(--bad); }
+  main { display: grid; grid-template-columns: 280px minmax(0, 1fr) 340px; gap: 14px; padding: 14px 20px; align-items: start; }
+  @media (max-width: 1100px) { main { grid-template-columns: 240px minmax(0, 1fr); } #feed { grid-column: 1 / -1; } }
+  @media (max-width: 700px) { main { grid-template-columns: minmax(0, 1fr); } }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+  section > h2 { margin: 0; padding: 10px 14px; font-size: 12px; text-transform: uppercase; letter-spacing: .6px; color: var(--muted); border-bottom: 1px solid var(--line); }
+  .pad { padding: 14px; }
+  .empty { padding: 22px 14px; color: var(--muted); }
+  input[type=search] { width: calc(100% - 20px); margin: 10px; padding: 7px 9px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--text); font: inherit; }
+  #list { max-height: calc(100vh - 190px); overflow: auto; }
+  .dev { display: block; width: 100%; text-align: left; border: 0; border-top: 1px solid var(--line); background: none; color: inherit; font: inherit; padding: 9px 14px; cursor: pointer; }
+  .dev:hover { background: var(--bg); }
+  .dev.sel { background: var(--accent-soft); box-shadow: inset 3px 0 0 var(--accent); }
+  .dev b { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .dev small, .sub { color: var(--muted); font-size: 12px; }
+  .tag { display: inline-block; margin-left: 6px; padding: 1px 7px; border-radius: 10px; font-size: 11px; font-weight: 600; vertical-align: 1px; }
+  .tag.fault { background: var(--bad-soft); color: var(--bad); }
+  .tag.scn { background: var(--warn-soft); color: var(--warn); }
+  .tag.ok { background: var(--ok-soft); color: var(--ok); }
+  .title { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+  .title h3 { margin: 0; font-size: 20px; }
+  .addr { font-family: var(--mono); font-size: 13px; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 2px 8px; }
+  .facts { display: flex; gap: 22px; flex-wrap: wrap; margin: 12px 0 4px; }
+  .facts div { font-size: 12px; color: var(--muted); }
+  .facts strong { display: block; font-size: 15px; color: var(--text); font-weight: 600; }
+  .banner { margin-top: 12px; padding: 9px 12px; border-radius: 6px; font-size: 13px; }
+  .banner.fault { background: var(--bad-soft); color: var(--bad); }
+  .banner.scn { background: var(--warn-soft); color: var(--warn); }
+  h4 { margin: 20px 0 8px; font-size: 12px; text-transform: uppercase; letter-spacing: .6px; color: var(--muted); }
+  .scroll { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { text-align: left; font-weight: 600; color: var(--muted); font-size: 12px; padding: 6px 10px 6px 0; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  td { padding: 6px 10px 6px 0; border-bottom: 1px solid var(--line); vertical-align: top; }
+  tr:last-child td { border-bottom: 0; }
+  td.num { font-family: var(--mono); font-variant-numeric: tabular-nums; white-space: nowrap; font-weight: 600; }
+  td.mono { font-family: var(--mono); font-size: 12px; white-space: nowrap; }
+  .steps { list-style: none; margin: 0; padding: 0; }
+  .steps li { display: flex; gap: 10px; padding: 4px 0; }
+  .steps .t { font-family: var(--mono); font-size: 12px; color: var(--muted); min-width: 56px; text-align: right; }
+  .steps .done { color: var(--muted); text-decoration: line-through; }
+  #events { max-height: calc(100vh - 150px); overflow: auto; }
+  .ev { padding: 8px 14px; border-top: 1px solid var(--line); }
+  .ev:first-child { border-top: 0; }
+  .ev .when { font-family: var(--mono); font-size: 11px; color: var(--muted); }
+  .ev .who { font-size: 12px; font-weight: 600; color: var(--accent); margin-left: 8px; }
+  .ev .what { display: block; overflow-wrap: anywhere; }
+  .res-ok { color: var(--ok); } .res-bad { color: var(--bad); }
+</style>
+</head>
+<body>
+<header>
+  <h1>fieldpuppet</h1>
+  <span class="meta" id="meta">connecting…</span>
+  <span class="live"><span class="dot" id="dot"></span><span id="livetext">live</span></span>
+</header>
+<main>
+  <section>
+    <h2>Devices</h2>
+    <input type="search" id="filter" placeholder="Filter by name or port" aria-label="Filter devices">
+    <div id="list"></div>
+  </section>
+  <section id="detail"><div class="empty">Loading…</div></section>
+  <section id="feed">
+    <h2>Activity</h2>
+    <div id="events"></div>
+  </section>
+</main>
+<script>
+"use strict";
+// All text coming from the simulator is inserted with textContent, never as HTML.
+const FUNCTIONS = { 1: "Read coils", 2: "Read discrete inputs", 3: "Read holding registers", 4: "Read input registers",
+  5: "Write coil", 6: "Write register", 15: "Write coils", 16: "Write registers" };
+const $ = (id) => document.getElementById(id);
+let selected = null, devices = [], lastEventKey = "";
+
+function el(tag, props, ...kids) {
+  const node = document.createElement(tag);
+  for (const [k, v] of Object.entries(props || {})) {
+    if (k === "class") node.className = v; else if (k === "onclick") node.onclick = v; else node.setAttribute(k, v);
+  }
+  for (const kid of kids.flat()) if (kid !== null && kid !== undefined && kid !== false) node.append(kid);
+  return node;
+}
+const clock = (ms) => new Date(ms).toLocaleTimeString([], { hour12: false });
+const number = (v) => (typeof v === "number" ? (Number.isInteger(v) ? String(v) : v.toFixed(3).replace(/\.?0+$/, "")) : String(v));
+function duration(s) {
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = Math.floor(s % 60);
+  return h ? h + " h " + m + " min" : m ? m + " min " + sec + " s" : sec + " s";
+}
+
+function renderList() {
+  const q = $("filter").value.trim().toLowerCase();
+  const shown = devices.filter((d) => !q || d.id.toLowerCase().includes(q) || d.name.toLowerCase().includes(q) || String(d.port).includes(q));
+  const list = $("list");
+  if (!devices.length) {
+    list.replaceChildren(el("div", { class: "empty" }, "No devices yet. Ask your assistant to create one, or start the program with a project file."));
+    return;
+  }
+  if (!shown.length) { list.replaceChildren(el("div", { class: "empty" }, "No device matches the filter.")); return; }
+  list.replaceChildren(...shown.map((d) =>
+    el("button", { class: "dev" + (d.id === selected ? " sel" : ""), onclick: () => { selected = d.id; renderList(); loadDetail(); } },
+      el("b", {}, d.id, d.fault ? el("span", { class: "tag fault" }, "fault") : null,
+        d.scenario && d.scenario.state === "running" ? el("span", { class: "tag scn" }, "scenario") : null),
+      el("small", {}, "port " + d.port + " · unit " + d.unit_id + " · " + d.points + " points"))));
+}
+
+function renderEvents(events) {
+  const key = events.length ? events.length + ":" + events[events.length - 1].unix_ms : "";
+  if (key === lastEventKey) return;
+  lastEventKey = key;
+  const box = $("events");
+  if (!events.length) { box.replaceChildren(el("div", { class: "empty" }, "Nothing has happened yet. Every change made to the simulation is listed here.")); return; }
+  box.replaceChildren(...events.slice().reverse().map((e) =>
+    el("div", { class: "ev" }, el("span", { class: "when" }, clock(e.unix_ms)), e.device ? el("span", { class: "who" }, e.device) : null,
+      el("span", { class: "what" }, e.text))));
+}
+
+function renderDetail(d) {
+  const sc = d.scenario;
+  const points = d.points.length
+    ? el("div", { class: "scroll" }, el("table", {},
+        el("thead", {}, el("tr", {}, ["Point", "Value", "Address", "Type", "Behaviour"].map((t) => el("th", {}, t)))),
+        el("tbody", {}, d.points.map((p) => el("tr", {},
+          el("td", {}, p.name, p.description ? el("div", { class: "sub" }, p.description) : null),
+          el("td", { class: "num" }, number(p.value), p.unit ? " " + p.unit : ""),
+          el("td", { class: "mono" }, p.table + " " + p.address),
+          el("td", { class: "mono" }, p.data_type + (p.scale !== 1 ? " × " + p.scale : "")),
+          el("td", {}, p.behaviour || el("span", { class: "sub" }, "fixed value")))))))
+    : el("div", { class: "sub" }, "This device has no points. Unmapped addresses read as zero.");
+  const steps = d.scenario_steps
+    ? el("ul", { class: "steps" }, d.scenario_steps.map((s) =>
+        el("li", {}, el("span", { class: "t" }, number(s.at_s) + " s"), el("span", { class: s.done ? "done" : "" }, s.text))))
+    : null;
+  const requests = d.recent_requests.length
+    ? el("div", { class: "scroll" }, el("table", {},
+        el("thead", {}, el("tr", {}, ["Time", "Client", "Request", "Address", "Count", "Result"].map((t) => el("th", {}, t)))),
+        el("tbody", {}, d.recent_requests.slice().reverse().map((r) => el("tr", {},
+          el("td", { class: "mono" }, clock(r.unix_ms)), el("td", { class: "mono" }, r.peer),
+          el("td", {}, FUNCTIONS[r.function] || "Function " + r.function),
+          el("td", { class: "mono" }, String(r.address)), el("td", { class: "mono" }, String(r.quantity)),
+          el("td", { class: r.result.startsWith("ok") ? "res-ok" : "res-bad" }, r.result))))))
+    : el("div", { class: "sub" }, "No Modbus client has contacted this device yet.");
+  $("detail").replaceChildren(el("div", { class: "pad" },
+    el("div", { class: "title" }, el("h3", {}, d.name), el("span", { class: "addr" }, d.host.split(" ")[0] + ":" + d.port + " · unit " + d.unit_id),
+      !d.fault && el("span", { class: "tag ok" }, "answering normally")),
+    el("div", { class: "sub" }, "id " + d.id + (d.template ? " · template " + d.template : "") + (d.strict ? " · strict addressing" : "")),
+    el("div", { class: "facts" },
+      el("div", {}, el("strong", {}, String(d.points.length)), "points"),
+      el("div", {}, el("strong", {}, String(d.requests_served)), "requests served"),
+      el("div", {}, el("strong", {}, String(d.points.filter((p) => p.behaviour).length)), "changing values")),
+    d.fault && el("div", { class: "banner fault" }, "Communication fault: " + d.fault.text +
+      (d.fault.remaining_s !== undefined ? " (" + number(d.fault.remaining_s) + " s left)" : " (until cleared)")),
+    sc && el("div", { class: "banner scn" }, "Scenario " + (sc.name ? "“" + sc.name + "” " : "") + sc.state + ": step " + Math.min(sc.next_step, sc.steps) + " of " + sc.steps + ", " + duration(sc.elapsed_s) + " elapsed" +
+      (sc.repeat ? ", repeating (" + sc.loops_completed + " loops done)" : "")),
+    el("h4", {}, "Points"), points,
+    steps && el("h4", {}, "Scenario steps"), steps,
+    el("h4", {}, "Recent requests"), requests));
+}
+
+async function loadDetail() {
+  if (!selected) { $("detail").replaceChildren(el("div", { class: "empty" }, devices.length ? "Select a device." : "Device details appear here.")); return; }
+  try {
+    const r = await fetch("/api/device/" + encodeURIComponent(selected));
+    if (r.status === 404) { selected = null; return loadDetail(); }
+    renderDetail(await r.json());
+  } catch (_) { /* the overview poll reports the lost connection */ }
+}
+
+async function poll() {
+  try {
+    const s = await (await fetch("/api/state")).json();
+    devices = s.devices;
+    if (!selected || !devices.some((d) => d.id === selected)) selected = devices.length ? devices[0].id : null;
+    $("meta").textContent = "v" + s.version + " · " + devices.length + " device" + (devices.length === 1 ? "" : "s") + " on " + s.host + " · running " + duration(s.uptime_s);
+    $("dot").className = "dot"; $("livetext").textContent = "live";
+    renderList(); renderEvents(s.events); await loadDetail();
+  } catch (_) {
+    $("dot").className = "dot off"; $("livetext").textContent = "simulator not reachable";
+  }
+  setTimeout(poll, devices.length > 300 ? 3000 : 1000);
+}
+$("filter").addEventListener("input", renderList);
+poll();
+</script>
+</body>
+</html>
