@@ -1,0 +1,23 @@
+[package]
+name = "fieldpuppet"
+version = "0.1.0"
+edition = "2021"
+description = "Multi-device Modbus TCP simulator with a built-in MCP server, so AI assistants can create devices, run scenarios and inject faults."
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+keywords = ["modbus", "simulator", "mcp", "industrial", "scada"]
+categories = ["command-line-utilities", "development-tools::testing", "simulation"]
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "io-std", "time", "sync", "signal"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true

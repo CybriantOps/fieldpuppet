@@ -1,0 +1,52 @@
+# Example project: a small water pumping station.
+# Run it with:  fieldpuppet run examples/water-station.yaml
+devices:
+  - id: pump-1
+    template: pump
+    port: 5020
+
+  - id: pump-2
+    template: pump
+    port: 5021
+    # After two minutes this pump trips and then stops answering for 30 seconds.
+    scenario:
+      name: pump trip
+      steps:
+        - { at_s: 120, action: set_point, point: fault, value: 1 }
+        - { at_s: 120, action: set_point, point: running, value: 0 }
+        - { at_s: 120, action: set_point, point: flow, value: 0 }
+        - { at_s: 125, action: fault, fault: { type: no_response, duration_s: 30 } }
+
+  - id: tank-1
+    template: tank
+    port: 5022
+
+  - id: main-meter
+    template: energy_meter
+    port: 5023
+
+  # A device defined point by point, sharing port 5023 as unit 2.
+  - id: dosing-skid
+    port: 5023
+    unit_id: 2
+    strict: true
+    points:
+      - name: chlorine_ppm
+        table: input
+        address: 0
+        data_type: u16
+        scale: 0.01
+        unit: ppm
+        value: 0.8
+        signal: { type: random_walk, min: 0.5, max: 1.2, step: 0.02 }
+      - name: dosing_rate
+        table: holding
+        address: 0
+        data_type: u16
+        scale: 0.1
+        unit: "l/h"
+        value: 12.5
+      - name: dosing_enabled
+        table: coil
+        address: 0
+        value: 1
