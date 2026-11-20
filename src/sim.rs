@@ -16,6 +16,7 @@ use crate::model::*;
 use crate::{net, templates};
 
 const LOG_CAPACITY: usize = 500;
+const EVENT_CAPACITY: usize = 300;
 const AUTO_PORT_ATTEMPTS: u32 = 2000;
 
 #[derive(Clone, Debug)]
@@ -25,6 +26,8 @@ pub struct Config {
     pub max_devices: usize,
     pub tick_ms: u64,
     pub data_dir: PathBuf,
+    /// Address of the web dashboard once it is listening.
+    pub ui_url: Option<String>,
 }
 
 /// Small xorshift generator: good enough for noise, no dependency needed.
@@ -62,6 +65,55 @@ pub struct ActiveFault {
     pub until: Option<f64>,
 }
 
+/// One line of the activity feed: something the simulator did, in plain words.
+#[derive(Clone, Debug, Serialize)]
+pub struct Event {
+    pub unix_ms: u64,
+    pub device: Option<String>,
+    pub text: String,
+}
+
+fn unix_ms() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+}
+
+fn describe_signal(s: &Signal) -> String {
+    match s {
+        Signal::Constant { value } => format!("constant {}", value),
+        Signal::Ramp { from, to, period_s, repeat } => {
+            format!("ramp {} to {} over {} s{}", from, to, period_s, if *repeat { ", repeating" } else { "" })
+        }
+        Signal::Sine { min, max, period_s } => format!("sine {} to {}, period {} s", min, max, period_s),
+        Signal::Random { min, max } => format!("random {} to {}", min, max),
+        Signal::RandomWalk { min, max, step } => format!("random walk {} to {}, step {}", min, max, step),
+        Signal::Counter { per_second, .. } => format!("counter +{} per second", per_second),
+        Signal::Square { low, high, period_s } => format!("square {} / {}, period {} s", low, high, period_s),
+    }
+}
+
+fn describe_fault(f: &Fault) -> String {
+    let kind = match f.kind {
+        FaultKind::Delay { ms } => format!("answers delayed by {} ms", ms),
+        FaultKind::NoResponse => "no response".to_string(),
+        FaultKind::Exception { code } => format!("exception code {}", code),
+        FaultKind::Disconnect => "connection dropped on every request".to_string(),
+    };
+    match f.duration_s {
+        Some(d) => format!("{} for {} s", kind, d),
+        None => kind,
+    }
+}
+
+pub fn describe_action(a: &Action) -> String {
+    match a {
+        Action::SetPoint { point, value } => format!("set {} = {}", point, value),
+        Action::SetSignal { point, signal } => format!("{}: {}", point, describe_signal(signal)),
+        Action::ClearSignal { point } => format!("stop signal on {}", point),
+        Action::Fault { fault } => format!("fault: {}", describe_fault(fault)),
+        Action::ClearFault => "clear fault".to_string(),
+    }
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct LogEntry {
     pub unix_ms: u64,
@@ -88,6 +140,8 @@ pub struct Device {
     pub scenario: Option<RunningScenario>,
     pub log: VecDeque<LogEntry>,
     pub requests: u64,
+    /// Things that happened on their own (scenario steps, expiring faults), waiting for the activity feed.
+    pending: Vec<String>,
     rng: Rng,
 }
 
@@ -110,6 +164,7 @@ impl Device {
             scenario: None,
             log: VecDeque::new(),
             requests: 0,
+            pending: Vec::new(),
             rng: Rng::new(seed),
         };
         for def in points {
@@ -256,6 +311,7 @@ impl Device {
     }
 
     fn run_action(&mut self, action: Action, now: f64) {
+        self.pending.push(format!("Scenario step: {}", describe_action(&action)));
         // Steps were validated when the scenario was applied; a point removed since then is skipped.
         let _ = match action {
             Action::SetPoint { point, value } => self.set_point(&point, value),
@@ -272,10 +328,12 @@ impl Device {
     fn tick(&mut self, now: f64, dt: f64) {
         if matches!(&self.fault, Some(f) if f.until.is_some_and(|u| now >= u)) {
             self.fault = None;
+            self.pending.push("Fault ended (time limit reached)".to_string());
         }
 
         // Collect the scenario steps that are due, then run them (keeps the borrow simple).
         let mut due = Vec::new();
+        let mut finished = None;
         if let Some(rs) = &mut self.scenario {
             if !rs.finished {
                 let elapsed = now - rs.t0;
@@ -290,12 +348,16 @@ impl Device {
                         rs.loops += 1;
                     } else {
                         rs.finished = true;
+                        finished = Some(rs.scenario.steps.len());
                     }
                 }
             }
         }
         for a in due {
             self.run_action(a, now);
+        }
+        if let Some(steps) = finished {
+            self.pending.push(format!("Scenario finished ({} steps)", steps));
         }
 
         for idx in 0..self.points.len() {
@@ -313,7 +375,7 @@ impl Device {
         if self.log.len() >= LOG_CAPACITY {
             self.log.pop_front();
         }
-        let unix_ms = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
+        let unix_ms = unix_ms();
         self.log.push_back(LogEntry { unix_ms, peer: peer.to_string(), function, address, quantity, result });
     }
 
@@ -338,6 +400,17 @@ impl Device {
         let mut v = self.summary(bind, now);
         v["strict"] = json!(self.strict);
         v["points"] = self.points_json(None);
+        v["scenario_steps"] = match &self.scenario {
+            None => Value::Null,
+            Some(rs) => Value::Array(
+                rs.scenario
+                    .steps
+                    .iter()
+                    .enumerate()
+                    .map(|(i, s)| json!({ "at_s": s.at_s, "text": describe_action(&s.action), "done": rs.finished || i < rs.next }))
+                    .collect(),
+            ),
+        };
         v
     }
 
@@ -357,6 +430,7 @@ impl Device {
                     "data_type": p.def.data_type,
                     "scale": p.def.scale,
                     "signal": p.def.signal,
+                    "behaviour": p.def.signal.as_ref().map(describe_signal),
                     "description": p.def.description,
                 })
             })
@@ -369,6 +443,7 @@ impl Device {
             None => Value::Null,
             Some(f) => {
                 let mut v = serde_json::to_value(&f.fault.kind).unwrap_or(Value::Null);
+                v["text"] = json!(describe_fault(&f.fault));
                 if let Some(u) = f.until {
                     v["remaining_s"] = json!(round1((u - now).max(0.0)));
                 }
@@ -441,6 +516,7 @@ pub struct Sim {
     pub cfg: Config,
     pub devices: BTreeMap<String, Device>,
     pub listeners: HashMap<u16, JoinHandle<()>>,
+    pub events: VecDeque<Event>,
     t0: Instant,
 }
 
@@ -452,6 +528,7 @@ impl Sim {
             cfg,
             devices: BTreeMap::new(),
             listeners: HashMap::new(),
+            events: VecDeque::new(),
             t0: Instant::now(),
         }))
     }
@@ -468,10 +545,25 @@ impl Sim {
         self.devices.get_mut(id).ok_or_else(|| anyhow!("no device with id '{}'. Devices: {}", id, known.join(", ")))
     }
 
+    /// Add a line to the activity feed shown on the dashboard.
+    pub fn note(&mut self, device: Option<&str>, text: impl Into<String>) {
+        if self.events.len() >= EVENT_CAPACITY {
+            self.events.pop_front();
+        }
+        self.events.push_back(Event { unix_ms: unix_ms(), device: device.map(str::to_string), text: text.into() });
+    }
+
     pub fn tick(&mut self, dt: f64) {
         let now = self.now();
+        let mut happened = Vec::new();
         for d in self.devices.values_mut() {
             d.tick(now, dt);
+            for text in d.pending.drain(..) {
+                happened.push((d.id.clone(), text));
+            }
+        }
+        for (id, text) in happened {
+            self.note(Some(&id), text);
         }
     }
 
