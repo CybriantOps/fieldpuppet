@@ -204,28 +204,40 @@ const FAULT_HELP: &str = "Fault object. One of: {\"type\":\"delay\",\"ms\":N} (s
 failure, 6 busy) | {\"type\":\"disconnect\"} (drop the TCP connection on every request). Add \"duration_s\":N to clear \
 it automatically.";
 
-fn tool(name: &str, description: &str, properties: Value, required: &[&str]) -> Value {
+/// `kind` sets the behaviour hints clients show to users:
+/// "read" changes nothing, "change" edits simulator state, "remove" deletes or overwrites something.
+fn tool(name: &str, title: &str, kind: &str, idempotent: bool, description: &str, properties: Value, required: &[&str]) -> Value {
     json!({
         "name": name,
+        "title": title,
         "description": description,
         "inputSchema": { "type": "object", "properties": properties, "required": required },
+        "annotations": {
+            "title": title,
+            "readOnlyHint": kind == "read",
+            "destructiveHint": kind == "remove",
+            "idempotentHint": idempotent,
+            // Everything happens inside this simulator; no outside system is touched.
+            "openWorldHint": false,
+        },
     })
 }
 
 fn point_schema() -> Value {
     json!({
         "type": "object",
+        "description": "Definition of one point: a named value stored at a Modbus address.",
         "properties": {
-            "name": { "type": "string" },
-            "table": { "type": "string", "enum": ["coil", "discrete", "holding", "input"] },
-            "address": { "type": "integer", "minimum": 0, "maximum": 65535, "description": "Zero-based protocol address." },
+            "name": { "type": "string", "description": "Point name, unique within the device. Used by set_point, set_signal and read_points." },
+            "table": { "type": "string", "enum": ["coil", "discrete", "holding", "input"], "description": "Modbus table: coil and discrete hold bits, holding and input hold 16-bit registers." },
+            "address": { "type": "integer", "minimum": 0, "maximum": 65535, "description": "Zero-based protocol address (holding register 40001 is address 0)." },
             "data_type": { "type": "string", "enum": ["bool", "u16", "i16", "u32", "i32", "f32"], "description": "Default u16. 32-bit types use two registers." },
             "scale": { "type": "number", "description": "Engineering value = raw * scale. Default 1." },
-            "unit": { "type": "string" },
+            "unit": { "type": "string", "description": "Engineering unit shown next to the value, for example kW or bar. Informational only." },
             "word_swap": { "type": "boolean", "description": "For 32-bit types: low word first." },
             "value": { "type": "number", "description": "Initial engineering value." },
             "signal": { "type": "object", "description": SIGNAL_HELP },
-            "description": { "type": "string" }
+            "description": { "type": "string", "description": "Free text describing the point. Informational only." }
         },
         "required": ["name", "table", "address"]
     })
@@ -236,19 +248,20 @@ fn scenario_schema() -> Value {
         "type": "object",
         "description": "Timeline of steps for one device.",
         "properties": {
-            "name": { "type": "string" },
-            "repeat": { "type": "boolean", "description": "Start over after the last step." },
+            "name": { "type": "string", "description": "Label shown in list_devices and on the dashboard. Optional." },
+            "repeat": { "type": "boolean", "description": "Start over after the last step. Default false." },
             "steps": {
                 "type": "array",
+                "description": "Steps in any order; each runs once when its time is reached.",
                 "items": {
                     "type": "object",
                     "description": "at_s is seconds after the scenario starts. action is one of: \
 set_point (point, value) | set_signal (point, signal) | clear_signal (point) | fault (fault) | clear_fault.",
                     "properties": {
-                        "at_s": { "type": "number", "minimum": 0 },
-                        "action": { "type": "string", "enum": ["set_point", "set_signal", "clear_signal", "fault", "clear_fault"] },
-                        "point": { "type": "string" },
-                        "value": { "type": "number" },
+                        "at_s": { "type": "number", "minimum": 0, "description": "Seconds after the scenario starts at which this step runs." },
+                        "action": { "type": "string", "enum": ["set_point", "set_signal", "clear_signal", "fault", "clear_fault"], "description": "What the step does. set_point needs point and value; set_signal needs point and signal; clear_signal needs point; fault needs fault; clear_fault needs nothing else." },
+                        "point": { "type": "string", "description": "Point name, for set_point, set_signal and clear_signal." },
+                        "value": { "type": "number", "description": "Engineering value, for set_point." },
                         "signal": { "type": "object", "description": SIGNAL_HELP },
                         "fault": { "type": "object", "description": FAULT_HELP }
                     },
@@ -261,114 +274,159 @@ set_point (point, value) | set_signal (point, signal) | clear_signal (point) | f
 }
 
 fn tool_list() -> Value {
-    let dev = json!({ "type": "string", "description": "Device id as returned by create_device or list_devices." });
+    let dev = json!({ "type": "string", "description": "Id of a running device, as returned by create_device, clone_device or list_devices." });
+    let point = json!({ "type": "string", "description": "Name of an existing point on that device (see get_device or read_points)." });
+    let table = json!({ "type": "string", "enum": ["coil", "discrete", "holding", "input"], "description": "Modbus table: coil and discrete hold bits, holding and input hold 16-bit registers." });
     json!([
-        tool("list_templates", "List the built-in device templates and the points each one provides.", json!({}), &[]),
         tool(
-            "create_device",
-            "Start a simulated Modbus TCP device. Without a port it gets the next free port; give a port that is already in use by this simulator together with a different unit_id to put several devices behind one port. Returns the host, port and unit id to connect to.",
+            "list_templates", "List device templates", "read", true,
+            "List the built-in device templates (generic, energy_meter, vfd, temperature_controller, pump, tank) with every point each one provides: name, table, address, data type and unit. Call this before create_device to choose a template or to learn point names. Changes nothing.",
+            json!({}), &[],
+        ),
+        tool(
+            "create_device", "Create a simulated device", "change", false,
+            "Start one simulated Modbus TCP device that real client software can connect to. Use clone_device instead when you need many copies of a device that already exists, and load_project to bring back a saved set. Without a port the device gets the next free port; give a port already used by this simulator together with a different unit_id to put several devices behind one port. Fails if the id is taken, the port is used by another program, or the device limit is reached. Returns the device id plus the host, port and unit id to connect to.",
             json!({
-                "template": { "type": "string", "description": "Built-in template name (see list_templates). Optional." },
-                "id": { "type": "string", "description": "Optional id: letters, digits, '-' and '_'." },
-                "name": { "type": "string", "description": "Optional display name." },
-                "port": { "type": "integer", "minimum": 1, "maximum": 65535, "description": "Optional TCP port. Omit for the next free port." },
-                "unit_id": { "type": "integer", "minimum": 0, "maximum": 255, "description": "Modbus unit id. Default 1." },
-                "strict": { "type": "boolean", "description": "Answer 'illegal data address' for addresses no point covers. Default false (unmapped addresses read 0)." },
+                "template": { "type": "string", "description": "Built-in template name (see list_templates). Omit for an empty device and supply points yourself." },
+                "id": { "type": "string", "description": "Id for the new device: letters, digits, '-' and '_'. Omit to get <template>-N automatically." },
+                "name": { "type": "string", "description": "Display name shown in list_devices and on the dashboard. Optional." },
+                "port": { "type": "integer", "minimum": 1, "maximum": 65535, "description": "TCP port to listen on. Omit for the next free port." },
+                "unit_id": { "type": "integer", "minimum": 0, "maximum": 255, "description": "Modbus unit id the device answers to. Default 1." },
+                "strict": { "type": "boolean", "description": "true: answer 'illegal data address' for addresses no point covers. Default false: unmapped addresses read 0." },
                 "points": { "type": "array", "items": point_schema(), "description": "Extra points, or replacements for template points with the same name." },
                 "scenario": scenario_schema()
             }),
             &[],
         ),
         tool(
-            "clone_device",
-            "Create several copies of an existing device, each on its own port (for example 50 identical meters).",
+            "clone_device", "Clone a device many times", "change", false,
+            "Create several copies of a running device, each on its own port, for example 50 identical meters for a load test. Copies start with the source's points, current values, signals and settings; later changes to the source do not reach them. Use create_device for a single new device. If a copy cannot be created the call stops there and the error says how many were made; those copies keep running. Returns the id, port and unit id of every copy.",
             json!({
-                "source_id": dev,
-                "count": { "type": "integer", "minimum": 1, "maximum": 1000 },
-                "start_port": { "type": "integer", "minimum": 1, "maximum": 65535, "description": "Optional first port; copies use consecutive ports. Omit for the next free ports." },
-                "id_prefix": { "type": "string", "description": "Optional id prefix; copies are named <prefix>-1, <prefix>-2, ..." }
+                "source_id": { "type": "string", "description": "Id of the running device to copy." },
+                "count": { "type": "integer", "minimum": 1, "maximum": 1000, "description": "How many copies to create." },
+                "start_port": { "type": "integer", "minimum": 1, "maximum": 65535, "description": "Port of the first copy; the others use the following ports. Omit for the next free ports." },
+                "id_prefix": { "type": "string", "description": "Copies are named <prefix>-1, <prefix>-2, ... Default: the source id." }
             }),
             &["source_id", "count"],
         ),
-        tool("list_devices", "List running devices with their address, fault and scenario state.", json!({}), &[]),
-        tool("get_device", "Full detail of one device, including every point and its current value.", json!({ "device_id": dev }), &["device_id"]),
-        tool("remove_device", "Stop one device and free its port.", json!({ "device_id": dev }), &["device_id"]),
-        tool("remove_all_devices", "Stop every device.", json!({}), &[]),
         tool(
-            "read_points",
-            "Read current engineering values of a device's points (all points when 'points' is omitted).",
-            json!({ "device_id": dev, "points": { "type": "array", "items": { "type": "string" } } }),
+            "list_devices", "List running devices", "read", true,
+            "List every running device with its id, host, port, unit id, active fault and scenario state, plus the dashboard address. Use it to find device ids or to check what is running; use get_device for one device's points and values. Changes nothing.",
+            json!({}), &[],
+        ),
+        tool(
+            "get_device", "Show one device in full", "read", true,
+            "Return everything about one device: connection details, settings, active fault, scenario progress and every point with its address, data type and current value. Use read_points instead when you only need values. Changes nothing. Fails if the id is unknown.",
+            json!({ "device_id": dev }), &["device_id"],
+        ),
+        tool(
+            "remove_device", "Remove one device", "remove", false,
+            "Stop one device and free its port. Its points, values, traffic log and running scenario are discarded and Modbus clients can no longer reach it. This cannot be undone unless the device was saved with save_project. Use remove_all_devices to clear everything. Fails if the id is unknown.",
+            json!({ "device_id": dev }), &["device_id"],
+        ),
+        tool(
+            "remove_all_devices", "Remove every device", "remove", true,
+            "Stop every running device and free all their ports. All points, values, traffic logs and scenarios are discarded; saved project files are not touched. Use it to start from a clean state, and call save_project first if the current setup should be kept. Returns how many devices were removed (0 if none were running).",
+            json!({}), &[],
+        ),
+        tool(
+            "read_points", "Read point values", "read", true,
+            "Read the current engineering values (after scaling) of a device's points, with their units. Use this to check what a device is reporting right now; use read_registers when you need the raw 16-bit words a Modbus client would receive. Changes nothing. Fails if the device or a named point does not exist.",
+            json!({ "device_id": dev, "points": { "type": "array", "items": { "type": "string" }, "description": "Point names to read. Omit to read every point of the device." } }),
             &["device_id"],
         ),
         tool(
-            "set_point",
-            "Set a point to a fixed engineering value. Stops any signal running on that point.",
-            json!({ "device_id": dev, "point": { "type": "string" }, "value": { "type": "number" } }),
+            "set_point", "Set a point to a fixed value", "change", true,
+            "Set one point to a fixed engineering value (the simulator applies the point's scale and data type). Any signal running on that point is stopped, so the value stays until changed again. Use set_signal for a value that changes over time and write_registers to write raw words at an address. Returns the point with its new value. Fails if the device or point does not exist.",
+            json!({ "device_id": dev, "point": point, "value": { "type": "number", "description": "New engineering value. For bool points use 0 or 1." } }),
             &["device_id", "point", "value"],
         ),
         tool(
-            "set_signal",
-            "Make a point change over time (sine, ramp, random, counter, ...). Pass signal null to stop the signal and keep the current value.",
-            json!({ "device_id": dev, "point": { "type": "string" }, "signal": { "type": ["object", "null"], "description": SIGNAL_HELP } }),
+            "set_signal", "Make a point change over time", "change", true,
+            "Attach a signal to one point so its value changes by itself: sine, ramp, random, random walk, counter, square or constant. It replaces any signal already on that point and runs until replaced, stopped, or overwritten by set_point. Pass signal null to stop the signal and keep the current value. Use set_point for a fixed value and apply_scenario to change several things on a timeline. Returns the point with its current value.",
+            json!({ "device_id": dev, "point": point, "signal": { "type": ["object", "null"], "description": SIGNAL_HELP } }),
             &["device_id", "point", "signal"],
         ),
-        tool("add_point", "Add a point to a running device.", json!({ "device_id": dev, "point": point_schema() }), &["device_id", "point"]),
-        tool("remove_point", "Remove a point from a running device.", json!({ "device_id": dev, "point": { "type": "string" } }), &["device_id", "point"]),
         tool(
-            "read_registers",
-            "Read raw values straight from a Modbus table, exactly as a client would receive them.",
+            "add_point", "Add a point to a device", "change", false,
+            "Add one new named point (a coil, discrete input or register value) to a device that is already running, without restarting it or disturbing connected clients. Use it to extend a template device; to define points when a device is first created, pass them to create_device instead. The point takes its initial value, or starts its signal, immediately. Returns the new point with its current value. Fails if the device does not exist, the name is already used on that device, or the definition is invalid (for example a 32-bit type in a bit table).",
+            json!({ "device_id": dev, "point": point_schema() }), &["device_id", "point"],
+        ),
+        tool(
+            "remove_point", "Remove a point from a device", "remove", false,
+            "Delete one named point from a running device, together with any signal on it. Only the definition is removed: the raw value last stored at its address stays readable by Modbus clients until overwritten (or is rejected if the device is strict and no other point covers the address). The device and its other points keep running. Use remove_device to remove the whole device. Fails if the device or point does not exist.",
+            json!({ "device_id": dev, "point": point }), &["device_id", "point"],
+        ),
+        tool(
+            "read_registers", "Read raw Modbus values", "read", true,
+            "Read raw values straight from one Modbus table of a device, exactly as a client would receive them: 0 or 1 for coil and discrete, unscaled 16-bit words (0-65535) for holding and input. Use it to verify byte order, scaling or addresses; use read_points for engineering values by name. Addresses no point covers read 0, even on strict devices. Changes nothing and is not recorded in the traffic log. Returns the table, start address and list of values.",
             json!({
                 "device_id": dev,
-                "table": { "type": "string", "enum": ["coil", "discrete", "holding", "input"] },
-                "address": { "type": "integer", "minimum": 0, "maximum": 65535 },
-                "quantity": { "type": "integer", "minimum": 1, "maximum": 125 }
+                "table": table,
+                "address": { "type": "integer", "minimum": 0, "maximum": 65535, "description": "Zero-based address of the first value." },
+                "quantity": { "type": "integer", "minimum": 1, "maximum": 125, "description": "How many consecutive values to read." }
             }),
             &["device_id", "table", "address", "quantity"],
         ),
         tool(
-            "write_registers",
-            "Write raw values into a Modbus table (0-65535 for registers, 0 or 1 for coils and discrete inputs). Unlike a Modbus client this can also write the read-only tables.",
+            "write_registers", "Write raw Modbus values", "change", true,
+            "Write raw values into one Modbus table of a device, starting at an address: 0-65535 for holding and input registers, 0 or 1 for coils and discrete inputs. Unlike a Modbus client this can also write the read-only tables (discrete, input), which is how you fake sensor inputs at an address no point covers. Use set_point when the address belongs to a named point and you want scaling applied; a signal running on a point at that address will overwrite the value on its next update. Returns how many values were written.",
             json!({
                 "device_id": dev,
-                "table": { "type": "string", "enum": ["coil", "discrete", "holding", "input"] },
-                "address": { "type": "integer", "minimum": 0, "maximum": 65535 },
-                "values": { "type": "array", "items": { "type": "integer" }, "minItems": 1, "maxItems": 125 }
+                "table": table,
+                "address": { "type": "integer", "minimum": 0, "maximum": 65535, "description": "Zero-based address of the first value." },
+                "values": { "type": "array", "items": { "type": "integer" }, "minItems": 1, "maxItems": 125, "description": "Values for consecutive addresses, first value at 'address'." }
             }),
             &["device_id", "table", "address", "values"],
         ),
         tool(
-            "apply_scenario",
-            "Play a timeline of steps on one device, starting now. Replaces any scenario already running on it.",
+            "apply_scenario", "Play a scenario on a device", "change", false,
+            "Play a timeline of timed steps on one device, starting now: set values, start or stop signals, inject or clear faults at given seconds. Use it to rehearse a sequence such as a pump trip followed by recovery; use set_point, set_signal or inject_fault for a single immediate change. Replaces any scenario already running on that device. Values, signals and faults set by steps stay in place after the scenario ends. Returns the scenario state.",
             json!({ "device_id": dev, "scenario": scenario_schema() }),
             &["device_id", "scenario"],
         ),
-        tool("stop_scenario", "Stop the scenario on a device. Values, signals and faults stay as they are.", json!({ "device_id": dev }), &["device_id"]),
         tool(
-            "inject_fault",
-            "Make a device misbehave on the wire: slow answers, no answer, exception replies or dropped connections.",
+            "stop_scenario", "Stop a device's scenario", "change", true,
+            "Stop the scenario running on one device so no further steps are played. Nothing is rolled back: values, signals and faults stay as the scenario left them (use clear_fault or set_point to reset them). Safe to call when no scenario is running. Fails if the device does not exist.",
+            json!({ "device_id": dev }), &["device_id"],
+        ),
+        tool(
+            "inject_fault", "Inject a communication fault", "change", true,
+            "Make one device misbehave on the wire so you can test how client software copes: slow answers, no answer (timeout), Modbus exception replies, or dropped connections. The fault applies to every request the device receives, replaces any fault already active on it, and lasts until clear_fault is called or its optional duration_s runs out. Point values keep updating in the background. Use apply_scenario to schedule faults at set times.",
             json!({ "device_id": dev, "fault": { "type": "object", "description": FAULT_HELP } }),
             &["device_id", "fault"],
         ),
-        tool("clear_fault", "Return a device to normal communication.", json!({ "device_id": dev }), &["device_id"]),
         tool(
-            "get_traffic_log",
-            "Most recent Modbus requests a device received (function code, address, quantity, result). Useful to see what the software under test is polling.",
-            json!({ "device_id": dev, "limit": { "type": "integer", "minimum": 1, "maximum": 500, "description": "Default 50." } }),
+            "clear_fault", "Clear a device's fault", "change", true,
+            "Remove the active communication fault from one device so it answers Modbus requests normally again. Use it to end a fault started by inject_fault or by a scenario step before its duration runs out. It does not stop a running scenario, which may inject a fault again at a later step (use stop_scenario for that), and it does not change any values. Safe to call when no fault is active. Returns 'cleared': true if a fault was removed, false if there was none. Fails if the device does not exist.",
+            json!({ "device_id": dev }), &["device_id"],
+        ),
+        tool(
+            "get_traffic_log", "Show recent Modbus requests", "read", true,
+            "Show the most recent Modbus requests a device received from client software, oldest first: function code, address, quantity and how it was answered, plus the total number of requests served. Use it to see what the software under test is polling or to confirm a fault took effect. The log keeps the last 500 requests per device and is lost when the device is removed. Changes nothing.",
+            json!({ "device_id": dev, "limit": { "type": "integer", "minimum": 1, "maximum": 500, "description": "How many of the latest requests to return. Default 50." } }),
             &["device_id"],
         ),
         tool(
-            "save_project",
-            "Save all running devices (points, current values, signals, ports, running scenarios) to a named project file.",
-            json!({ "name": { "type": "string", "description": "Letters, digits, '-' and '_'." } }),
+            "save_project", "Save devices to a project", "remove", true,
+            "Save every running device (points, current values, signals, ports, running scenarios) to a named project file on this machine so the same setup can be restored later with load_project. An existing project with the same name is overwritten without warning; call list_projects first to check. Running devices are not affected. Traffic logs and active faults are not saved. Fails if no devices are running. Returns the file path and device count.",
+            json!({ "name": { "type": "string", "description": "Project name: letters, digits, '-' and '_', at most 64 characters." } }),
             &["name"],
         ),
         tool(
-            "load_project",
-            "Start the devices stored in a saved project.",
-            json!({ "name": { "type": "string" }, "replace": { "type": "boolean", "description": "Remove the currently running devices first. Default false." } }),
+            "load_project", "Load a saved project", "remove", false,
+            "Start the devices stored in a project saved earlier with save_project, on the ports recorded in it. By default they are added next to the devices already running, and the call fails part-way if an id or port is already in use (devices started before the failure keep running). With replace true, all running devices are removed first, which discards their unsaved state. Call list_projects to see the available names. Returns the devices that were started.",
+            json!({
+                "name": { "type": "string", "description": "Name of a saved project, exactly as shown by list_projects." },
+                "replace": { "type": "boolean", "description": "true: remove all currently running devices before loading. Default false: keep them." }
+            }),
             &["name"],
         ),
-        tool("list_projects", "List saved projects.", json!({}), &[]),
+        tool(
+            "list_projects", "List saved projects", "read", true,
+            "List the names of the projects saved with save_project, sorted alphabetically, and the directory they are stored in. Use it to find a name for load_project or to check whether a name is taken before save_project overwrites it. Shows names only; load a project to see its devices. Changes nothing and returns an empty list when nothing has been saved.",
+            json!({}), &[],
+        ),
     ])
 }
 
