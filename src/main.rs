@@ -5,6 +5,7 @@ mod model;
 mod net;
 mod sim;
 mod templates;
+mod ui;
 
 use std::net::IpAddr;
 use std::path::PathBuf;
@@ -60,6 +61,12 @@ struct Opts {
     /// Folder for projects saved through MCP. Default: ~/.fieldpuppet/projects
     #[arg(long)]
     data_dir: Option<PathBuf>,
+    /// Port of the web dashboard. The next free port is used if this one is taken.
+    #[arg(long, default_value_t = 5080)]
+    ui_port: u16,
+    /// Do not start the web dashboard.
+    #[arg(long)]
+    no_ui: bool,
 }
 
 impl Opts {
@@ -68,7 +75,28 @@ impl Opts {
             let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(PathBuf::from);
             home.unwrap_or_else(|| PathBuf::from(".")).join(concat!(".", env!("CARGO_PKG_NAME"))).join("projects")
         });
-        Config { bind: self.bind, base_port: self.base_port, max_devices: self.max_devices, tick_ms: self.tick_ms, data_dir }
+        Config {
+            bind: self.bind,
+            base_port: self.base_port,
+            max_devices: self.max_devices,
+            tick_ms: self.tick_ms,
+            data_dir,
+            ui_url: None,
+        }
+    }
+}
+
+/// Start the dashboard unless it was switched off. A dashboard that cannot start never stops the simulator.
+async fn start_ui(shared: &sim::Shared, port: u16, disabled: bool) -> Option<String> {
+    if disabled {
+        return None;
+    }
+    match ui::start(shared.clone(), port).await {
+        Ok(url) => Some(url),
+        Err(e) => {
+            eprintln!("dashboard not started: {:#}", e);
+            None
+        }
     }
 }
 
@@ -82,7 +110,7 @@ async fn main() -> Result<()> {
     match Cli::parse().command {
         Command::Templates => {
             use std::io::Write;
-            // Build the text first and ignore a closed pipe (e.g. `templates | head`).
+            // Build the text first and ignore a closed pipe (for example when piped into head).
             let mut text = String::new();
             for t in templates::TEMPLATES {
                 text.push_str(&format!("{:<24} {}\n", t.name, t.description));
@@ -97,8 +125,12 @@ async fn main() -> Result<()> {
 
         Command::Mcp { opts, project } => {
             // stdout carries the protocol, so everything for humans goes to stderr.
+            let (ui_port, no_ui) = (opts.ui_port, opts.no_ui);
             let shared = Sim::new(opts.config());
             sim::spawn_ticker(shared.clone());
+            if let Some(url) = start_ui(&shared, ui_port, no_ui).await {
+                eprintln!("dashboard: {}", url);
+            }
             if let Some(path) = project {
                 let created = sim::load_project(&shared, read_project(&path)?).await?;
                 eprintln!("loaded {} device(s) from {}", created.len(), path.display());
@@ -108,8 +140,10 @@ async fn main() -> Result<()> {
         }
 
         Command::Run { project, opts } => {
+            let (ui_port, no_ui) = (opts.ui_port, opts.no_ui);
             let shared = Sim::new(opts.config());
             sim::spawn_ticker(shared.clone());
+            let dashboard = start_ui(&shared, ui_port, no_ui).await;
             let created = sim::load_project(&shared, read_project(&project)?).await?;
             if created.is_empty() {
                 anyhow::bail!("{} contains no devices", project.display());
@@ -124,6 +158,10 @@ async fn main() -> Result<()> {
                     d["unit_id"],
                     d["points"]
                 );
+            }
+            shared.lock().unwrap().note(None, format!("Loaded {} device(s) from {}", created.len(), project.display()));
+            if let Some(url) = dashboard {
+                println!("Dashboard: {}", url);
             }
             println!("Press Ctrl+C to stop.");
             tokio::signal::ctrl_c().await?;
