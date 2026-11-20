@@ -53,7 +53,11 @@ fn server_info() -> Value {
 async fn tool_call_result(shared: &Shared, params: &Value) -> Value {
     let name = params.get("name").and_then(Value::as_str).unwrap_or("").to_string();
     let args = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
-    match call_tool(shared, &name, args).await {
+    let outcome = call_tool(shared, &name, args.clone()).await;
+    if let Some((device, text)) = describe_call(&name, &args, &outcome) {
+        shared.lock().unwrap().note(device.as_deref(), text);
+    }
+    match outcome {
         Ok(value) => json!({
             "content": [{ "type": "text", "text": serde_json::to_string_pretty(&value).unwrap_or_default() }],
             "isError": false,
@@ -63,6 +67,60 @@ async fn tool_call_result(shared: &Shared, params: &Value) -> Value {
             "isError": true,
         }),
     }
+}
+
+/// Activity-feed line for a tool call that changes something. Read-only tools give nothing.
+fn describe_call(name: &str, args: &Value, outcome: &Result<Value>) -> Option<(Option<String>, String)> {
+    const CHANGING: &[&str] = &[
+        "create_device", "clone_device", "remove_device", "remove_all_devices", "set_point", "set_signal",
+        "add_point", "remove_point", "write_registers", "apply_scenario", "stop_scenario", "inject_fault",
+        "clear_fault", "save_project", "load_project",
+    ];
+    if !CHANGING.contains(&name) {
+        return None;
+    }
+    let s = |k: &str| args.get(k).and_then(Value::as_str).unwrap_or("?").to_string();
+    let device = args.get("device_id").and_then(Value::as_str).map(str::to_string);
+    let result = match outcome {
+        Ok(v) => v,
+        Err(e) => return Some((device, format!("Request '{}' failed: {:#}", name, e))),
+    };
+    let text = match name {
+        "create_device" => {
+            let id = result["id"].as_str().unwrap_or("?").to_string();
+            let kind = args.get("template").and_then(Value::as_str).map(|t| format!(" from template '{}'", t)).unwrap_or_default();
+            return Some((
+                Some(id),
+                format!("Device created{} on port {}, unit {} ({} points)", kind, result["port"], result["unit_id"], result["points"]),
+            ));
+        }
+        "clone_device" => format!("Created {} copies of '{}'", result["created"], s("source_id")),
+        "remove_device" => "Device removed".to_string(),
+        "remove_all_devices" => format!("All devices removed ({})", result["removed"]),
+        "set_point" => format!("Set {} = {}", s("point"), args["value"]),
+        "set_signal" => match args.get("signal") {
+            Some(Value::Null) | None => format!("Stopped signal on {}", s("point")),
+            Some(sig) => format!("Started {} signal on {}", sig["type"].as_str().unwrap_or("a"), s("point")),
+        },
+        "add_point" => format!("Added point {}", args["point"]["name"].as_str().unwrap_or("?")),
+        "remove_point" => format!("Removed point {}", s("point")),
+        "write_registers" => format!("Wrote {} raw value(s) to {} address {}", result["written"], s("table"), args["address"]),
+        "apply_scenario" => {
+            let sc = &args["scenario"];
+            let n = sc["steps"].as_array().map(Vec::len).unwrap_or(0);
+            match sc["name"].as_str().filter(|n| !n.is_empty()) {
+                Some(name) => format!("Scenario '{}' started ({} steps)", name, n),
+                None => format!("Scenario started ({} steps)", n),
+            }
+        }
+        "stop_scenario" => "Scenario stopped".to_string(),
+        "inject_fault" => format!("Fault injected: {}", result["fault"]["text"].as_str().unwrap_or("?")),
+        "clear_fault" => "Fault cleared".to_string(),
+        "save_project" => format!("Project '{}' saved ({} devices)", s("name"), result["devices"]),
+        "load_project" => format!("Project '{}' loaded", s("name")),
+        _ => return None,
+    };
+    Some((device, text))
 }
 
 /// Serves both protocol eras on the same pipe: a request that names its version in `_meta`
@@ -388,7 +446,7 @@ async fn call_tool(shared: &Shared, name: &str, args: Value) -> Result<Value> {
             let now = sim.now();
             let bind = sim.cfg.bind;
             let list: Vec<Value> = sim.devices.values().map(|d| d.summary(bind, now)).collect();
-            Ok(json!({ "count": list.len(), "host": connect_host(bind), "devices": list }))
+            Ok(json!({ "count": list.len(), "host": connect_host(bind), "dashboard": sim.cfg.ui_url, "devices": list }))
         }
 
         "get_device" => {
